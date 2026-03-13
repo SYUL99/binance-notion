@@ -1,3 +1,5 @@
 websockets
 requests
 python-dotenv
+gspread
+google-auth
