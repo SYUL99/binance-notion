@@ -1,5 +1,5 @@
 """
-바이낸스 실시간 체결 → Telegram 알림 + Google Sheets 기록
+바이낸스 실시간 체결 → Telegram 알림 + Airtable 기록
 현물(Spot) + 선물(Futures) 동시 감지
 """
 
@@ -7,19 +7,18 @@ import asyncio
 import json
 import os
 import requests
-import gspread
 import websockets
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 
 load_dotenv()
 
-BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY")
-TELEGRAM_TOKEN     = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
-GOOGLE_SHEET_NAME  = os.getenv("GOOGLE_SHEET_NAME", "바이낸스 매매기록")
-GOOGLE_CREDS_FILE  = os.getenv("GOOGLE_CREDS_FILE", "google_credentials.json")
+BINANCE_API_KEY  = os.getenv("BINANCE_API_KEY")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+AIRTABLE_TOKEN   = os.getenv("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE   = os.getenv("AIRTABLE_TABLE", "매매기록")
 
 SPOT_REST    = "https://api.binance.com"
 FUTURES_REST = "https://fapi.binance.com"
@@ -28,43 +27,39 @@ FUTURES_WS   = "wss://fstream.binance.com/ws"
 
 KST = timezone(timedelta(hours=9))
 
-# ── Google Sheets 초기화 ────────────────────────────────────
+# ── Airtable 기록 ───────────────────────────────────────────
 
-SHEET_HEADERS = ["체결시간", "계정", "거래쌍", "방향", "수량", "가격", "총액(USDT)"]
-
-def init_sheet():
-    creds = Credentials.from_service_account_file(
-        GOOGLE_CREDS_FILE,
-        scopes=["https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"]
-    )
-    gc = gspread.authorize(creds)
+def record_to_airtable(trade: dict):
+    total = round(float(trade["qty"]) * float(trade["price"]), 4)
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "fields": {
+            "체결시간":    trade["time"][:19].replace("T", " "),
+            "계정":        trade["account"],
+            "거래쌍":      trade["symbol"],
+            "방향":        trade["side"],
+            "수량":        float(trade["qty"]),
+            "가격":        float(trade["price"]),
+            "총액(USDT)": total,
+        }
+    }
     try:
-        sh = gc.open(GOOGLE_SHEET_NAME)
-    except gspread.SpreadsheetNotFound:
-        sh = gc.create(GOOGLE_SHEET_NAME)
-        print(f"📄 새 시트 생성됨: {GOOGLE_SHEET_NAME}")
+        r = requests.post(url, headers=headers, json=body, timeout=10)
+        if r.status_code == 200:
+            print(f"📋 Airtable 기록 완료: {trade['symbol']} {trade['side']} {total} USDT")
+        else:
+            print(f"❌ Airtable 오류 {r.status_code}: {r.text}")
+    except Exception as e:
+        print(f"❌ Airtable 예외: {e}")
 
-    ws = sh.sheet1
-    # 헤더가 없으면 추가
-    if ws.row_values(1) != SHEET_HEADERS:
-        ws.insert_row(SHEET_HEADERS, 1)
-        # 헤더 굵게 (선택)
-        ws.format("A1:G1", {"textFormat": {"bold": True}})
-        print("✅ 시트 헤더 설정 완료")
-    return ws
-
-try:
-    sheet = init_sheet()
-    print("✅ Google Sheets 연결 완료")
-except Exception as e:
-    print(f"❌ Google Sheets 연결 실패: {e}")
-    sheet = None
-
-# ── Telegram 전송 ───────────────────────────────────────────
+# ── Telegram 알림 ───────────────────────────────────────────
 
 def send_telegram(trade: dict):
-    total = float(trade["qty"]) * float(trade["price"])
+    total = round(float(trade["qty"]) * float(trade["price"]), 2)
     emoji = "🟢" if "매수" in trade["side"] else "🔴"
     text = (
         f"{emoji} *{trade['account']}* 체결\n"
@@ -73,49 +68,28 @@ def send_telegram(trade: dict):
         f"📌 방향: *{trade['side']}*\n"
         f"📦 수량: `{trade['qty']}`\n"
         f"💵 가격: `{trade['price']} USDT`\n"
-        f"💰 총액: `{round(total, 2)} USDT`\n"
+        f"💰 총액: `{total} USDT`\n"
         f"🕐 시간: {trade['time'][11:19]}"
     )
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-            timeout=10
+            timeout=10,
         )
         if r.status_code == 200:
-            print(f"📨 텔레그램 전송 완료")
+            print(f"📨 Telegram 전송 완료")
         else:
-            print(f"❌ 텔레그램 오류: {r.text}")
+            print(f"❌ Telegram 오류: {r.text}")
     except Exception as e:
-        print(f"❌ 텔레그램 예외: {e}")
-
-# ── Google Sheets 기록 ──────────────────────────────────────
-
-def record_to_sheet(trade: dict):
-    if not sheet:
-        return
-    total = round(float(trade["qty"]) * float(trade["price"]), 4)
-    row = [
-        trade["time"][:19].replace("T", " "),  # 2024-01-01 14:30:00
-        trade["account"],
-        trade["symbol"],
-        trade["side"],
-        float(trade["qty"]),
-        float(trade["price"]),
-        total,
-    ]
-    try:
-        sheet.append_row(row, value_input_option="USER_ENTERED")
-        print(f"📊 시트 기록 완료: {trade['symbol']} {trade['side']} {total} USDT")
-    except Exception as e:
-        print(f"❌ 시트 기록 오류: {e}")
+        print(f"❌ Telegram 예외: {e}")
 
 # ── 체결 처리 ───────────────────────────────────────────────
 
 def process_trade(trade: dict):
     print(f"\n🔔 체결 감지 | {trade['account']} | {trade['symbol']} {trade['side']}")
     send_telegram(trade)
-    record_to_sheet(trade)
+    record_to_airtable(trade)
 
 # ── 바이낸스 ListenKey ──────────────────────────────────────
 
@@ -124,7 +98,7 @@ def get_listen_key(rest_base, is_futures=False):
     r = requests.post(
         f"{rest_base}{endpoint}",
         headers={"X-MBX-APIKEY": BINANCE_API_KEY},
-        timeout=10
+        timeout=10,
     )
     r.raise_for_status()
     return r.json()["listenKey"]
@@ -136,7 +110,7 @@ def keepalive(rest_base, listen_key, is_futures=False):
         f"{rest_base}{endpoint}",
         headers={"X-MBX-APIKEY": BINANCE_API_KEY},
         params={"listenKey": listen_key},
-        timeout=10
+        timeout=10,
     )
 
 # ── 메시지 파싱 ─────────────────────────────────────────────
@@ -206,7 +180,7 @@ async def run_stream(ws_base, rest_base, is_futures, parser):
 
 async def main():
     print("=" * 50)
-    print("  바이낸스 → Telegram + Google Sheets")
+    print("  바이낸스 → Telegram + Airtable 자동 기록")
     print("  종료: Ctrl + C")
     print("=" * 50)
 
