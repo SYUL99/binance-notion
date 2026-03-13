@@ -16,9 +16,9 @@ load_dotenv()
 BINANCE_API_KEY  = os.getenv("BINANCE_API_KEY")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-AIRTABLE_TOKEN   = os.getenv("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE   = os.getenv("AIRTABLE_TABLE", "매매기록")
+AIRTABLE_TOKEN    = os.getenv("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID  = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE    = os.getenv("AIRTABLE_TABLE")  # 테이블 이름 또는 ID (tblXXXXX)
 
 SPOT_REST    = "https://api.binance.com"
 FUTURES_REST = "https://fapi.binance.com"
